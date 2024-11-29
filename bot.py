@@ -1,12 +1,16 @@
 import os
 import datetime
+import dateparser
 from openai import OpenAI
 import gspread
+import json
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update
-from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
-
+from telegram.ext import (
+    Application, CommandHandler, ContextTypes, ConversationHandler,
+    MessageHandler, filters
+)
 # Load environment variables
 load_dotenv()
 
@@ -41,88 +45,196 @@ def setup_google_sheets():
 # Initialize Google Sheets
 sheet = setup_google_sheets()
 
-# Function to generate follow-up question using OpenAI
-async def generate_follow_up(user_message):
+# Define conversation states
+CONTEXT, MISSING_INFO, CONTACT_INFO, END = range(4)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Generate a follow-up question based on the user's input using OpenAI's API.
-    
-    Args:
-        user_message (str): The original user message
-    
-    Returns:
-        str: Generated follow-up question
+    Start the conversation and ask for context.
     """
+    context.user_data['ID'] = f"{update.effective_chat.id}-{int(datetime.datetime.now().timestamp())}"
+    await update.message.reply_text("Hi! Please tell me about the person you met.")
+    return CONTEXT
+
+async def extract_fields_from_context(context_message):
+    """
+    Use OpenAI to extract Name, Timestamp, and Context from the context message.
+    """
+    prompt = f"""Extract the following fields from the user's message:
+
+- Name of the person met
+- Time expression when they met (as mentioned by the user, e.g., 'last night', 'yesterday')
+- Context (any additional details)
+
+User's message:
+\"\"\"
+{context_message}
+\"\"\"
+
+Provide the extracted information in JSON format like:
+{{
+  "Name": "Name of the person",
+  "Timestamp": "Time expression",
+  "Context": "Additional details"
+}}
+If any field is missing, leave it empty like "Name": "".
+"""
+
     try:
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant. Suggest follow-up questions based on user input."
-                },
-                {
-                    "role": "user",
-                    "content": f"Based on this input: '{user_message}', suggest follow-up questions to gather more information."
-                }
-            ],
-            max_tokens=100
+            messages=[{'role': 'user', 'content': prompt}],
+            max_tokens=150,
+            temperature=0,
         )
-        
-        # Extract the response text
-        follow_up_question = response.choices[0].message.content.strip()
-        return follow_up_question
-
+        response_text = response.choices[0].message.content.strip()
+        extracted_data = json.loads(response_text)
+        return extracted_data
     except Exception as e:
-        print(f"Error generating follow-up: {e}")
-        return "I'm curious to learn more. Could you tell me more about that?"
+        print(f"Error parsing OpenAI response: {e}")
+        return {}
 
-
-# Handle user messages
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def context_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handle incoming messages, log them, and generate a follow-up question.
-    
-    Args:
-        update (Update): Telegram update object
-        context (ContextTypes.DEFAULT_TYPE): Context for the current conversation
+    Save the context provided by the user and attempt to extract fields.
     """
-    # Extract message details
-    user_message = update.message.text
-    chat_id = update.effective_chat.id
-    user_name = update.message.from_user.first_name
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    context_message = update.message.text
+    extracted_data = await extract_fields_from_context(context_message)
 
-    # Generate a unique interaction ID
-    interaction_id = f"{chat_id}-{int(datetime.datetime.now().timestamp())}"
+    # Save whatever data was extracted
+    context.user_data['Context'] = extracted_data.get('Context', context_message)
+    context.user_data['Name'] = extracted_data.get('Name', '')
+    context.user_data['Timestamp'] = extracted_data.get('Timestamp', '')
 
-    # Save the initial input to Google Sheets
+    missing_fields = []
+    if not context.user_data['Name']:
+        missing_fields.append('Name')
+    if not context.user_data['Timestamp']:
+        missing_fields.append('Timestamp')
+
+    if missing_fields:
+        # Ask for missing information
+        missing_str = ' and '.join(missing_fields)
+        await update.message.reply_text(f"I couldn't find the {missing_str} in your message. Could you please provide it?")
+        return MISSING_INFO
+    else:
+        await update.message.reply_text("Do you have any contact information for this person?")
+        return CONTACT_INFO
+
+async def missing_info_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Save missing information provided by the user.
+    """
+    user_reply = update.message.text
+
+    # Attempt to extract missing fields from user's reply
+    prompt = f"""Given the user's reply, extract any missing information:
+
+Missing fields: {', '.join([key for key in ['Name', 'Timestamp'] if not context.user_data.get(key)])}
+
+User's reply:
+\"\"\"
+{user_reply}
+\"\"\"
+
+Provide the extracted information in JSON format like:
+{{
+  "Name": "Name of the person",
+  "Timestamp": "YYYY-MM-DD"
+}}
+If any field is still missing, leave it empty.
+"""
     try:
-        sheet.append_row([interaction_id, user_name, "", user_message, timestamp, "Pending"])
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{'role': 'user', 'content': prompt}],
+            max_tokens=100,
+            temperature=0,
+        )
+        response_text = response.choices[0].message.content.strip()
+        extracted_data = json.loads(response_text)
+        # Update context with any new data
+        for key in ['Name', 'Timestamp']:
+            if extracted_data.get(key):
+                context.user_data[key] = extracted_data[key]
+    except Exception as e:
+        print(f"Error parsing OpenAI response: {e}")
+
+    # Check again for any missing fields
+    missing_fields = []
+    if not context.user_data['Name']:
+        missing_fields.append('Name')
+    if not context.user_data['Timestamp']:
+        missing_fields.append('Timestamp')
+
+    if missing_fields:
+        # If still missing information, ask again
+        missing_str = ' and '.join(missing_fields)
+        await update.message.reply_text(f"Sorry, I still need the {missing_str}. Could you please provide it?")
+        return MISSING_INFO
+    else:
+        await update.message.reply_text("Do you have any contact information for this person?")
+        return CONTACT_INFO
+
+async def contact_info_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Save the contact info and finish the conversation.
+    """
+    context.user_data['Contact Info'] = update.message.text
+    context.user_data['Follow-Up Status'] = "Pending"
+
+    # Parse Timestamp to ensure it's a valid date
+    timestamp_str = context.user_data['Timestamp']
+    parsed_date = dateparser.parse(timestamp_str, settings={'RELATIVE_BASE': datetime.datetime.now()})
+    if parsed_date:
+        context.user_data['Timestamp'] = parsed_date.strftime('%Y-%m-%d')
+    else:
+        # If parsing fails, default to the current date
+        context.user_data['Timestamp'] = datetime.datetime.now().strftime('%Y-%m-%d')
+
+    # Save data to Google Sheets
+    data = context.user_data
+    try:
+        sheet.append_row([
+            data['ID'],
+            data['Name'],
+            data['Context'],
+            data['Timestamp'],
+            data['Contact Info'],
+            data['Follow-Up Status']
+        ])
+        await update.message.reply_text("Thank you! Your information has been saved.")
     except Exception as e:
         print(f"Error logging to Google Sheets: {e}")
+        await update.message.reply_text("There was an error saving your information.")
+    return ConversationHandler.END
 
-    # Generate a follow-up question using OpenAI
-    follow_up = await generate_follow_up(user_message)
-
-    # Respond to the user with confirmation and a follow-up question
-    await context.bot.send_message(
-        chat_id=chat_id, 
-        text=f"Got it! Here's a follow-up question:\n{follow_up}"
-    )
-
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Cancel the conversation.
+    """
+    await update.message.reply_text("Conversation cancelled.")
+    return ConversationHandler.END
 
 def main():
     """
     Set up and run the Telegram bot application.
     """
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-    # Handle plain text messages
-    
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Start the bot
+    conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, start)],
+        states={
+            CONTEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, context_state)],
+            MISSING_INFO: [MessageHandler(filters.TEXT & ~filters.COMMAND, missing_info_state)],
+            CONTACT_INFO: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact_info_state)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
+    application.add_handler(conv_handler)
     print("Bot is running. Press Ctrl+C to stop.")
-    application.run_polling(drop_pending_updates=True)
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
