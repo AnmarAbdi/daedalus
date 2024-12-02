@@ -110,7 +110,7 @@ async def extract_fields_from_context(context_message):
                 }
             ],
             tool_choice={"type": "tool", "name": "extract_data"},
-            system="You are an AI assistant designed to extract key details from a given context message and populate a virtual rolodex. Your task is to analyze the provided message and return a structured JSON object containing relevant information.\n\nHere is the context message you need to analyze:\n\n<context_message>\n{{context_message}}\n</context_message>\n\nPlease extract the following information from the context message and organize it into a JSON object:\n\n1. Name: The full name of the person mentioned in the context.\n2. Timestamp: The time or date when the interaction occurred. If an exact date is not provided, infer it based on time expressions like \"yesterday\" or \"last week\". Use any location information provided in the message to determine the correct date.\n3. Location: The place where the interaction occurred or where the person is located.\n4. Context: A brief summary of the conversation or relevant details about the interaction.\n5. Contact Info: Any contact information provided, such as email address or phone number.\n\nBefore providing the final JSON output, wrap your analysis process inside <analysis> tags. This will help ensure a thorough interpretation of the data.\n\nIn your analysis process:\n1. For each field (Name, Timestamp, Location, Context, and Contact Info), quote the relevant information from the context message.\n2. Analyze any location information provided and explain how you'll use it to determine the correct timestamp.\n3. Summarize the key points of the interaction for the Context field.\n4. Note any information that is missing or unclear in the context message.\n\nAfter your analysis, provide the final JSON output with the extracted information.\n\nOutput Format:\nThe JSON object should have the following structure:\n\n{\n  \"Name\": \"\",\n  \"Timestamp\": \"\",\n  \"Location\": \"\",\n  \"Context\": \"\",\n  \"Contact Info\": \"\"\n}\n\nPlease proceed with your analysis and provide the only the JSON output for the given context message.",
+            system="You are an AI assistant designed to extract key details from a given context message and populate a virtual rolodex. Your task is to analyze the provided message and return a structured JSON object containing relevant information.\n\nHere is the context message you need to analyze:\n\n<context_message>\n{{context_message}}\n</context_message>\n\nPlease extract the following information from the context message and organize it into a JSON object:\n\n1. Name: The full name of the person mentioned in the context.\n2. Timestamp: The time or date when the interaction occurred. If an exact date is not provided, infer it based on time expressions like \"yesterday\" or \"last week\". Use any location information provided in the message to determine the correct date.\n3. Location: The place where the interaction occurred or where the person is located.\n4. Context: A brief, shorthand summary of the conversation or relevant details about the interaction, capturing every detail of the context. You don't need to mention meeting them.\n5. Contact Info: Any contact information provided, such as email address or phone number.\n6. Class: Gauge whether this person is of one of the 4 following Classes: Professional, Academic, Personal, or Other. Assume people met in class or on campus are academic unless theres is positive and friendly sentiment regarding the interaction that could signal potential friendship outside of my courses.\n\nBefore providing the final JSON output, wrap your analysis process inside <analysis> tags. This will help ensure a thorough interpretation of the data.\n\nIn your analysis process:\n1. For each field (Name, Timestamp, Location, Context, and Contact Info), quote the relevant information from the context message.\n2. Analyze any location information provided and explain how you'll use it to determine the correct timestamp.\n3. Summarize the key points of the interaction for the Context field.\n4. Note any information that is missing or unclear in the context message.\n\nAfter your analysis, provide the final JSON output with the extracted information.\n\nOutput Format:\nThe JSON object should have the following structure:\n\n{\n  \"Name\": \"\",\n  \"Timestamp\": \"\",\n  \"Location\": \"\",\n  \"Context\": \"\",\n  \"Contact Info\": \"\"\n}\n\nPlease proceed with your analysis and provide the only the JSON output for the given context message.",
             messages=[{'role': 'user', 'content': prompt}]
         )
         response_text = response.content
@@ -141,9 +141,10 @@ async def context_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Save whatever data was extracted
     context.user_data['Context'] = extracted_data.get('context', context_message)
     context.user_data['Name'] = extracted_data.get('name', '')
+    context.user_data['Location'] = extracted_data.get('location', '')
     context.user_data['Timestamp'] = extracted_data.get('timestamp', '')
     context.user_data['Contact_Info'] = extracted_data.get('contact_info', '')
-    context.user_data['Follow-Up Status'] = 'Pending'
+    context.user_data['Follow-Up Status'] = 'Pending' #extracted_data.get('follow_up_status', )
 
     missing_fields = []
     if not context.user_data['Name']:
@@ -152,6 +153,8 @@ async def context_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
         missing_fields.append('Timestamp')
     if not context.user_data['Contact_Info']:
         missing_fields.append('Contact_Info')
+    if not context.user_data['Location']:
+        missing_fields.append('Location')
 
     if missing_fields:
         # Ask for missing information
@@ -164,6 +167,7 @@ async def context_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sheet.append_row([
                 context.user_data['ID'],
                 context.user_data['Name'],
+                context.user_data['Location'],
                 context.user_data['Context'],
                 context.user_data['Timestamp'],
                 context.user_data['Contact_Info'],
@@ -182,7 +186,7 @@ async def missing_info_state(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_reply = update.message.text
 
     # Check which fields are missing
-    missing_fields = [key for key in ['Name', 'Timestamp', 'Contact_Info'] 
+    missing_fields = [key for key in ['Name', 'Location', 'Timestamp', 'Contact_Info'] 
                      if not context.user_data.get(key)]
     
     # Attempt to extract missing fields from user's reply
@@ -192,7 +196,7 @@ async def missing_info_state(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data[field] = user_reply  # Add more sophisticated extraction as needed
     
     # Check if we still have missing fields
-    still_missing = [key for key in ['Name', 'Timestamp', 'Contact_Info'] 
+    still_missing = [key for key in ['Name', 'Location', 'Timestamp', 'Contact_Info'] 
                     if not context.user_data.get(key)]
     
     if still_missing:
@@ -205,6 +209,7 @@ async def missing_info_state(update: Update, context: ContextTypes.DEFAULT_TYPE)
         sheet.append_row([
             context.user_data['ID'],
             context.user_data['Name'],
+            context.user_data['Location'],
             context.user_data['Context'],
             context.user_data['Timestamp'],
             context.user_data['Contact_Info'],
